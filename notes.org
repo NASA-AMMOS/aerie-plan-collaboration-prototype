@@ -1,0 +1,277 @@
+#+TITLE:Chatting about Plan Collaboration
+
+(Kaos approach) (pronounced "Chaos")
+
+Goals:
+- To enable many users to collaborate on a plan.
+  - Allow a user to take a snapshot of the plan and make their own edits without seeing other people's edits
+  - Users can apply their edits to the original plan when they are ready
+
+- *Real-time collaboration* is two users working on the same plan at the same time - the users see each others' changes in real time.
+  This is currently supported (almost - if we have the timeline
+  subscribe to activity_directive database table updates) --> our new
+  design should support this as well (or at least not preclude it)
+  - Quick updates, smooth experience
+  - Handle finicky connectivity
+
+Operations, from most to least common:
+- viewing a plan
+- adding, editing, deleting activities
+- running simulations
+- checking constraints
+- running scheduling
+- *duplicate*
+- *merge*
+- *pull*
+- creating a fresh new plan
+- deleting a plan
+
+Activities have a /persistent identity/, which means that the identity
+of an activity must be preserved across *duplicate*.
+
+Defining our new operations based on observable properties:
+- Duplicate
+  - Pre-conditions: there is a plan with id A
+  - Post-conditions: there is a new plan with id B
+    - if you request the set of activities in B, you get the same set of activities as are in A
+    - if you request the parent plan of plan with id B, you will get id A
+    - if you request the children of plan A, you should get a set containing B
+  - Question: can A be updated /during/ the duplicate?
+    No, Duplicate must be /atomic/, by which we mean that plan B must represent a version of A that was observable at some point.
+    Because we're using Postgres, taking a snapshot of A does not need to block updates to A.
+    It should behave /as if/ we paused all updates while the duplicate was in progress (even if we did not actually pause them).
+- Merge
+  - Pre-conditions:
+  - There exists a plan C such that both A and B are direct descendants of C.
+
+    Plan B is a direct descendent of plan A if either:
+    - Plan A is Plan B
+    - Plan A is the parent of B
+    - or the parent of B is a direct descendant of A
+
+    Two plans A, and B are /related/ if there exists a plan C such
+    that A and B are both direct descendents of C. In this case C is
+    called a /common ancestor/.
+
+    We have two plans, A, and B. A must be /related/ to B.
+
+  - Post-conditions:
+    Suppose we are merging plan B into plan A, with nearest common ancestor C.
+
+    Plan B should not change at all.
+
+    All activities in B have either been
+    - Copied from snapshot of C unchanged
+    - Added to B or some ancestor after that snapshot of C
+    - Modified by B or some ancestor after the snapshot of C
+    - Deleted by B or some ancestor after the snapshot of C
+
+    The above applies to A equally.
+
+    A conflict is defined as follows:
+    A given activity in plan B is in conflict with an activity in plan A if:
+    - in both plans, that activity has been copied from C
+    - it has been modified in both plans
+    - the parameters to the activity are different between plans A and B * see nuisance conflicts note
+
+      If no conflicts: Plan A should contain all of the changes that occurred between C and B.
+
+    If yes conflicts:
+    - User can cancel the merge
+    - User can choose to have all changes from B overwrite all conflicting changes from A
+    - User can choose to ignore all changes from B that conflict with changes in A
+    - User can go through each conflicting activity and choose either the version from B or the version from A
+
+    Does plan B continue to exist after merge? /Yes/
+
+    Question: What should happen when we try to merge B into A twice?
+    Those activities that didn't conflict got updated, no biggie
+    Should activities that were conflicts /be conflicts again/
+    - Case 1: When we merged, we chose to keep B's version. In this
+      case, those conflicts should not surface again
+    - Case 2: When we merged, we chose to keep A's version. In this
+      case, the conflicts will (must) appear again (unless we try to
+      "remember" the choices from the previous merge... could be
+      dicey)
+    - Of course, any new updates must be conflicts
+- Delete
+  - Pre-conditions: there exists a plan A
+  - Post-conditions: there does not exist a plan A??? (Or, alternatively, the answer to "is plan A deleted" should be yes)
+    Question: what happens when a user tries to delete a plan that has children?
+    - If the plan has no children, no problem, go ahead and delete it
+    - If it does have children, let them choose from these options:
+      - Recursively delete the children (CASCADE)
+      - Have the deleted plan's parent adopt its children (this doesn't work if the deleted plan has no parent)
+        - This option is only available if the plan has a parent
+    Question: what happens when a user tries to delete a plan that is involved in a merge?
+    - either user can choose not to delete
+    - Or user can cancel the merge
+
+  *Delete can be problematic if the plan you want to delete contains information necessary to merge other plans.*
+
+  So, in-progress merges can prevent deletes
+
+  Or... we can allow "soft" deletes (i.e. mark as "deleted"), and then
+  have some sort of "garbage collection" that cleans out deleted plans
+  that are no longer necessary
+
+- Pull (is redundant with merge)
+
+*NOTE*: It would improve user experience if we can minimize the number of "nuisance" conflicts.
+E.g. if we can detect that the arguments match exactly, we can suppress that conflict.
+
+TODO: Think about malformed json (placeholder activites) - is it okay to merge plans that contain malformed activities?
+Investigate: does the database even allow malformed json? Postgres's `jsonb` type... does it reject malformed json?
+
+This check should be limited to "exact match" meaning:
+- For a JSON object, the two must have the same keys, and the corresponding values must "match exactly"
+- For a JSON array, the two arrays must have the same length, and the corresponding items must "match exactly"
+- For all primitive JSON types, the two values must be identical (strings, numbers) (Q: what does identical mean for floats?...)
+
+Importantly - this means that if two values are semantically equivalent, but syntactically different, we /will still treat them as different/.
+
+Since Merge is a multi-step operation that requires user interaction,
+we will need some notion of an "in-progress" merge (i.e. a "working
+copy")
+
+In a merge, there is a source plan (B) that is being merged into a target plan (A)
+Question: Do we want to lock both the source and target plan when there is an in-progress merge between them?
+/Yes, because the changes may conflict with the output of the merge/
+It is more important to lock A, because the result of the merge will modify A
+It /could/ be okay to allow updates to B, as long as they are not incorporated in the merge (however, this could be confusing to users)
+
+
+(org-babel-do-load-languages
+ 'org-babel-load-languages
+ '((python . t)))
+
+#+BEGIN_SRC python
+output = []
+def print(*args): output.append(" ".join(map(str, args)))
+
+def assertEqual(actual, expected, *messages):
+    if actual != expected:
+        raise AssertionError(" ".join([str(actual) + " != " + str(expected)] + [str(_) for _ in messages]))
+assertEquals=assertEqual
+
+def run_suite(*suite, reset=None):
+    if reset is not None: reset()
+    passed, failed = 0, 0
+    for test in suite:
+        try:
+            test(); passed += 1; print(test.__name__, "PASSED")
+        except AssertionError as e:
+            failed += 1; print(test.__name__, "FAILED", e)
+    print(passed + failed, "ran", passed, "passed", failed, "failed")
+
+###########################################################
+from collections import defaultdict, namedtuple
+
+db = defaultdict(list)
+def clear_db():
+    db.clear()
+
+Activity = namedtuple("Activity", "plan_id activity_id type start_time args")
+Plan = namedtuple("Plan", "id")
+
+
+def make_fresh_plan():
+    new_plan = Plan(len(db["plans"]))
+    db["plans"].append(new_plan)
+    return new_plan.id
+
+
+def get_activity_ids(plan_id):
+    return [activity.activity_id for activity in db["activities"] if activity.plan_id == plan_id]
+
+
+def is_same_activity(plan_id, activity_id_1, activity_id_2):
+    return activity_id_1 == activity_id_2
+
+
+def add_activity(plan_id, type="Type", *, start_time, args):
+    new_activity = Activity(plan_id, len(db["activities"]), type, start_time, args)
+    db["activities"].append(new_activity)
+    return new_activity.activity_id
+
+
+def modify_activity(plan_id, activity_id, new_start_time, new_activity_args):
+    pass
+
+
+def delete_activity(plan_id, activity_id):
+    pass
+
+
+def duplicate(plan):
+    pass
+
+
+def merge(source_plan, target_plan):
+    pass
+
+
+def delete(plan):
+    pass
+
+
+def test_merge_parent_no_conflicts():
+    plan_c = make_fresh_plan()
+
+    activity_0 = add_activity(
+        plan_c,
+        start_time=1,
+        args={},
+    )
+
+    assertEquals(get_activity_ids(plan_c), [activity_0])
+
+    plan_a = duplicate(plan_c)
+    plan_b = duplicate(plan_c)
+
+    merge(plan_a, plan_c)  # child into parent
+
+
+def test_merge_sibling():
+    plan_c = make_fresh_plan()
+    plan_a = duplicate(plan_c)
+    plan_b = duplicate(plan_c)
+
+    merge(plan_a, plan_b)  # siblings
+
+    assertEqual(1, 2, "whoops!")
+
+
+def test_merge_unrelated():
+    plan_c = make_fresh_plan()
+    plan_a = duplicate(plan_c)
+    plan_unrelated = make_fresh_plan()
+
+    merge(plan_a, plan_unrelated)  # should error
+    delete(plan_a)
+    delete(plan_c)
+
+
+run_suite(
+    test_merge_parent,
+    test_merge_sibling,
+    test_merge_unrelated,
+    reset=clear_db()
+)
+
+
+return "\n".join(output)
+#+END_SRC
+
+#+RESULTS:
+: test_merge_parent PASSED
+: test_merge_sibling FAILED 1 != 2 whoops!
+: test_merge_unrelated PASSED
+: 3 ran 2 passed 1 failed
+
+
+
+Implementation ideation:
+What is our representative of the "persistent identity" of activities?
+- Option 1: a row in a table for each unique activity
+- Option 2: a unique integer (but not unique row) for each activity
