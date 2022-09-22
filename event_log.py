@@ -92,8 +92,6 @@ class PlanCollaborationInterface(interface.PlanCollaborationInterface):
         # Set of activities that have been modified between the merge base and the source
         # Set of activities that have been modified between the merge base and the target
 
-
-
     def get_merge_base(db, source_plan, target_plan):
         def get_creation_event(plan_id):
             return [

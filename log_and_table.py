@@ -1,9 +1,18 @@
-from abc import ABC, abstractmethod
+import interface
 
+class PlanCollaborationImplementation(interface.PlanCollaborationInterface):
+    def __init__(db):
+        # plans table
+        # merges table
+        # event log for recovering snapshots and heritage
+        #  each event is a change to a plan, and it needs to refer to the previous plan snapshot
+        # activities table
+        # activity plan membership table
 
-class PlanCollaborationInterface(ABC):
+        pass
+
     @abstractmethod
-    def make_fresh_plan(db, start_time, end_time):
+    def make_fresh_plan(db):
         """
         Makes a new, empty plan
         :return: the new plan id
