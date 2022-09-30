@@ -30,25 +30,6 @@ class PlanCollaborationInterface(ABC):
         pass
 
     @abstractmethod
-    def is_same_activity_persistent_identity(db, plan_id_1, activity_id_1, plan_id_2, activity_id_2):
-        """
-        Determines whether two activities are the "same" activity, in terms of "persistent identity"
-        :return: True if they're the same, False otherwise
-        """
-        pass
-
-    @abstractmethod
-    def activities_are_compatible(db, plan_id_1, activity_id_1, plan_id_2, activity_id_2):
-        """
-        Determines whether two activities type, start time, and args are equal
-        :return: True if they match, False otherwise
-        """
-        pass
-
-    def activities_match(db, plan_id_1, activity_id_1, plan_id_2, activity_id_2):
-        return db.is_same_activity_persistent_identity(plan_id_1, activity_id_1, plan_id_2, activity_id_2) and db.activities_are_compatible(plan_id_1, activity_id_1, plan_id_2, activity_id_2)
-
-    @abstractmethod
     def add_activity(db, plan_id, type="Type", *, start_time, args):
         """
         Add a new activity to the given plan, if there are no in-progress merges where this plan is receiving changes
@@ -71,14 +52,14 @@ class PlanCollaborationInterface(ABC):
         pass
 
     @abstractmethod
-    def duplicate(db, plan):
+    def duplicate(db, plan, start_time, end_time):
         """
         We may want to add start and end time parameters to duplicate
         """
         pass
 
     @abstractmethod
-    def merge(db, plan_supplying_changes, plan_receiving_changes):
+    def request_merge(db, plan_supplying_changes, plan_receiving_changes):
         """
         There must be no in-progress merge involving the plan_receiving_changes
 
@@ -105,6 +86,22 @@ class PlanCollaborationInterface(ABC):
         pass
 
     @abstractmethod
+    def begin_merge(db, merge_request_id):
+        """
+        1. Lock the plan receiving changes from further modification
+        2. Identify the changesets of plans A and B with respect to the merge base.
+        3. Identify conflicts between the changesets.
+        4. Set the "merge request" state to "in progress", and populate the set of conflicts
+        5. Create a staging plan. This staging plan, which is a copy of the plan receiving changes,
+           contains all of the same things as the original plan, but it does not allow for modifications
+           to be made aside from those that come from resolving conflicts. Importantly, it must allow
+           running constraints, in order to help determine the validity of the merge.
+
+        Return the id of the new staging plan
+        """
+        pass
+
+    @abstractmethod
     def commit_merge(self, merge_id):
         """
         Checks that the merge is fully resolved (no conflicts are in the "UNRESOLVED" state)
@@ -118,6 +115,8 @@ class PlanCollaborationInterface(ABC):
     def abort_merge(self, merge_id):
         """
         Marks the merge as "ABORTED" (which unlocks the plan_receiving_changes for modification)
+
+        Delete the staging plan
         """
         pass
 
@@ -130,12 +129,6 @@ class PlanCollaborationInterface(ABC):
         """
         pass
 
-    @abstractmethod
-    def resolve_conflicts_bulk(self, merge_id, conflict_ids, resolutions):
-        """
-        Applies multiple resolutions
-        """
-        pass
 
     @abstractmethod
     def delete(db, plan):
